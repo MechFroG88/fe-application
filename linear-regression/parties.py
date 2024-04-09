@@ -1,11 +1,14 @@
-# Number of clients
-n = 20
+# Number of data provider
+parties = 3
 
-# Number of distinct values
-m = 10
+# Number of varibles
+n = 1
+
+# Number of datapoints
+datapoints = 100
 
 # Data Provider
-dp = [15000 + i for i in range(n)]
+dp = [15000 + i for i in range(parties)]
 
-# Trusted Party
-tp = ("localhost", 5555)
+coeff_range = 100
+error_range = 1000

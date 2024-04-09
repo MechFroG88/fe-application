@@ -1,8 +1,6 @@
-from mife.multiclient.rom.ddh import FeDDHMultiClient
+from mife.single.damgard import FeDamgard
 from dill import dumps, loads
-from parties import m, tp
-from Crypto.Util.number import bytes_to_long
-from hashlib import shake_256
+from parties import n, datapoints, coeff_range, error_range
 from helper import recv_until
 
 import sys
@@ -22,69 +20,57 @@ def start_listen(port):
             continue
     return s
 
-class DP:
-    def __init__(self, key, val_max):
-        self.key = key
-        self.val_max = val_max
-        self.val = 0
-        self.psi_val = {}
-
-    def bit_setVal(self, id, tag):
-        rand_val = shake_256(tag + str(id).encode()).digest(self.val_max.bit_length())
-        self.val = bytes_to_long(rand_val) % self.val_max
-
-    def bit_parseVal(self):
-        return [1 if i == self.val else 0 for i in range(self.val_max)]
-
-    def bit_encrypt(self, tag):
-        data = self.bit_parseVal()
-        return FeDDHMultiClient.encrypt(data, tag, self.key)
-    
-    def psi_setVal(self, id, tag):
-        self.psi_val = {}
-        for i in range(self.val_max):
-            rand_val = shake_256(f'psi{i}-'.encode() + tag + str(id).encode()).digest(self.val_max.bit_length())
-            if (bytes_to_long(rand_val) % 2):
-                self.psi_val[i] = 1
-    
-    def psi_parseVal(self):
-        return [0 if i in self.psi_val else random.randrange(-10000, 10000) for i in range(self.val_max)]
-    
-    def psi_encrypt(self, tag):
-        data = self.psi_parseVal()
-        return FeDDHMultiClient.encrypt(data, tag, self.key)
-
-
 if __name__ == "__main__":
     port = sys.argv[1] if len(sys.argv) >= 2 else 5000
     s = start_listen(port)
+    masterkey = FeDamgard.generate(n * datapoints)
+    
+    coeff = [random.randrange(0, coeff_range) for _ in range(n)]
+    constant = random.randrange(-coeff_range, coeff_range)
 
-    print("Starting data provider on port", port)
-    dp = None
+    print("Starting data provider on port", port, "\nCoefficients:", coeff, constant)
+    xs = []
+    ys = []
 
+    for i in range(datapoints):
+        x = [random.randrange(0, coeff_range) for _ in range(n)]
+        y = sum([x[j] * coeff[j] for j in range(n)]) + random.randrange(-error_range, error_range) + constant
+        xs += x
+        ys.append(y)
+
+    total_xy_lst = []
+    for i in range(n):
+        total_xy = 0
+        for j in range(datapoints):
+            total_xy += xs[j * n + i] * ys[j]
+        total_xy_lst.append(total_xy)
+
+    c = FeDamgard.encrypt(xs, masterkey)
+    total_y = sum(ys)
+    
     while True:
         conn, addr = s.accept()
-        msg = recv_until(conn, end_marker)
-        if (msg.startswith(b"enc_key: ")):
-            enc_key = loads(msg[9:])
-            dp = DP(enc_key, m)
-            print("Received encryption key")
-        else:
-            if dp is None:
-                conn.send(b"Error: No encryption key" + end_marker)
-                continue
-        if (msg.startswith(b"bit-tag: ")):
-            tag = msg[9:]
-            dp.bit_setVal(port, tag)
-            print(f"DP {port} Value", dp.val)
-            c = dumps(dp.bit_encrypt(tag))
-            conn.send(c + end_marker)
-        if (msg.startswith(b"psi-tag: ")):
-            tag = msg[9:]
-            dp.psi_setVal(port, tag)
-            print(f"DP {port} Value", dp.psi_val)
-            c = dumps(dp.psi_encrypt(tag))
-            conn.send(c + end_marker)
-        
-        conn.close()
+        while True:
+            msg = recv_until(conn, end_marker)
+            if (msg.startswith(b"0:")): # Public Key
+                conn.send(dumps(masterkey.get_public_key()) + end_marker)
+            if (msg.startswith(b"1:")): # Ciphertext
+                conn.send(dumps(c) + end_marker)
+            if (msg.startswith(b"2:")): # Total y
+                conn.send(dumps(total_y) + end_marker)
+            if (msg.startswith(b"3:")): # Total xy
+                conn.send(dumps(total_xy_lst) + end_marker)
+            if (msg.startswith(b"4:")): # Decryption Key
+                function_vector = loads(msg[2:])
+                dk = FeDamgard.keygen_safe(function_vector, masterkey, c)
+                conn.send(dumps(dk) + end_marker)
+            if (msg.startswith(b"5:")): # Datapoints for debug
+                conn.send(dumps((xs, ys)) + end_marker)
+            if (msg.startswith(b"6:")): # Number of datapoints
+                conn.send(dumps(datapoints) + end_marker)
+            if (msg.startswith(b"exit")):
+                conn.close()
+                break
+                
+
 
